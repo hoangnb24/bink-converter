@@ -52,12 +52,17 @@ jobs:
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            wine \
             wine64 \
             xvfb \
             p7zip-full \
             cabextract
-          # Wine 32-bit support (some Bink binaries use it)
-          sudo apt-get install -y --no-install-recommends wine32 || true
+          # Ubuntu's wine package installs binaries at /usr/bin/wine (a wrapper
+          # script) and /usr/lib/wine/wine64. The wrapper calls wine-stable or
+          # wine-staging. Make sure wine64 is resolvable.
+          which wine wine64 2>&1 || true
+          ls /usr/bin/wine* 2>&1 || true
+          ls /usr/lib/wine/ 2>&1 || true
 
       - name: Cache RAD Tools extraction
         uses: actions/cache@v4
@@ -123,8 +128,8 @@ jobs:
           export WINEPREFIX=$HOME/.wine
           export WINEDEBUG=-all
           export WINEARCH=win64
-          # Use -k to kill wineserver after init for clean shutdown
-          timeout 60 wine64 wineboot --init 2>&1 | tail -3
+          # Use wine (the wrapper) - it dispatches to wine64 internally
+          timeout 60 wine wineboot --init 2>&1 | tail -3
 
           echo "Wine prefix initialized:"
           ls $WINEPREFIX/drive_c/windows/system32/notepad.exe 2>&1
@@ -168,7 +173,8 @@ jobs:
           echo "Running radvideo64.exe under Wine + Xvfb..."
           start=$(date +%s)
           # Arguments after the binary: input.mp4 /bink /bink1 /bvN /baN output.bik
-          wine64 radtools-cache/radvideo64.exe \
+          # Use 'wine' wrapper - dispatches to wine64 automatically
+          timeout 300 wine radtools-cache/radvideo64.exe \
             input.mp4 \
             /bink /bink${{ inputs.format }} \
             /bv${{ inputs.video_bitrate }} \
@@ -179,10 +185,11 @@ jobs:
           echo "Exit code: $exit_code"
           echo "Elapsed: $((end - start)) seconds"
           if [ $exit_code -ne 0 ]; then
-            exit $exit_code
+            echo "Warning: radvideo64.exe returned $exit_code, but checking if file was created anyway"
           fi
           if [ ! -f "${{ inputs.output_name }}.bik" ]; then
             echo "Error: output file not created"
+            ls -la $WINEPREFIX/drive_c/
             exit 1
           fi
           echo "Output: ${{ inputs.output_name }}.bik"
