@@ -1,0 +1,173 @@
+name: bink-convert
+
+# Triggers:
+#   1. workflow_dispatch (manual trigger via Actions UI or `gh workflow run`)
+#   2. push to a file at inputs/<name>.mp4 (auto-convert on commit)
+#
+# Usage:
+#   # Manual:
+#   gh workflow run bink-convert.yml -f input_url=https://example.com/video.mp4 -f output_name=myvideo
+#
+#   # From local file (one-liner):
+#   gh workflow run bink-convert.yml \
+#     -f input_url="$(cat /path/to/local.mp4 | base64 | tr -d '\n')" \
+#     -f output_name=myvideo
+#   #   ... actually that doesn't work, see scripts/convert.sh for the right pattern
+#
+# Cost: free on public repo (unlimited Windows runner minutes)
+# First run: ~3-5 min cold (downloads RADTools, extracts)
+# Subsequent runs: ~1-2 min (cache hit on the extracted binary)
+# Per-conversion encode time: ~30s-2min depending on MP4 length and bitrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      input_url:
+        description: "URL to the input MP4 (http/https, or data: URI for inline)"
+        required: true
+        type: string
+        default: "https://github.com/hoangnb24/bink-converter/raw/main/test-fixtures/sample.mp4"
+      output_name:
+        description: "Output filename (without .bik extension)"
+        required: true
+        type: string
+        default: "output"
+      video_bitrate:
+        description: "Video bitrate in kbps (200-5000)"
+        required: false
+        type: string
+        default: "1000"
+      audio_bitrate:
+        description: "Audio bitrate in kbps (0 = no audio, 32-256)"
+        required: false
+        type: string
+        default: "128"
+      format:
+        description: "Bink version (1 = Bink 1 .bik, 2 = Bink 2 .bk2)"
+        required: false
+        type: string
+        default: "1"
+
+jobs:
+  convert:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache RAD Tools extraction
+        uses: actions/cache@v4
+        with:
+          path: radtools-cache
+          key: radtools-v1-${{ hashFiles('.github/radtools-checksum.txt') }}
+          restore-keys: |
+            radtools-v1-
+
+      - name: Download and extract RAD Video Tools
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "Downloading RADTools.7z..."
+          Invoke-WebRequest -Uri "https://www.radgametools.com/down/Bink/RADTools.7z" -OutFile "RADTools.7z"
+          Write-Host "Verifying SHA1..."
+          $expected = "d405195191ba984a4f87e6bce0b19cee2b9b0a3d"
+          $actual = (Get-FileHash -Path "RADTools.7z" -Algorithm SHA1).Hash.ToLower()
+          if ($actual -ne $expected) {
+            throw "SHA1 mismatch. Expected $expected, got $actual"
+          }
+          Write-Host "SHA1 OK. Extracting with 7z (password: RAD)..."
+          & 7z x RADTools.7z -pRAD -y | Out-Null
+          New-Item -ItemType Directory -Path "radtools-cache" -Force | Out-Null
+          & 7z e radtools.exe -oradtools-cache -y | Out-Null
+          Get-FileHash -Path "RADTools.7z" -Algorithm SHA1 | Out-File ".github/radtools-checksum.txt"
+          Write-Host "Extraction complete."
+          Get-ChildItem radtools-cache
+
+      - name: Verify cached extraction
+        if: steps.cache.outputs.cache-hit == 'true'
+        shell: pwsh
+        run: |
+          Get-ChildItem radtools-cache
+          if (-not (Test-Path "radtools-cache/radvideo64.exe")) {
+            throw "Cache restore failed: radvideo64.exe not found"
+          }
+
+      - name: Download input MP4
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = "${{ inputs.input_url }}"
+          Write-Host "Downloading input from: $url"
+          Invoke-WebRequest -Uri $url -OutFile "input.mp4"
+          $file = Get-Item "input.mp4"
+          Write-Host "Downloaded: $($file.Length) bytes"
+          if ($file.Length -lt 1000) {
+            throw "Downloaded file is too small ($($file.Length) bytes) - likely an error page, not a real MP4"
+          }
+
+      - name: Run RAD Video Tools encoder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $output = "${{ inputs.output_name }}.bik"
+          $bv = "${{ inputs.video_bitrate }}"
+          $ba = "${{ inputs.audio_bitrate }}"
+          $format = "${{ inputs.format }}"
+
+          # Build argument list
+          # /bink  = output to Bink format
+          # /bink1 = Bink 1 (.bik) vs /bink2 (.bk2)
+          # /bvN   = video bitrate in kbps
+          # /baN   = audio bitrate in kbps (0 = no audio)
+          $args = @(
+            "input.mp4"
+            "/bink"
+            "/bink$format"
+            "/bv$bv"
+            "/ba$ba"
+            $output
+          )
+
+          Write-Host "Running: radvideo64.exe $($args -join ' ')"
+          $startTime = Get-Date
+          $process = Start-Process -FilePath ".\radtools-cache\radvideo64.exe" `
+            -ArgumentList $args `
+            -NoNewWindow -Wait -PassThru
+          $elapsed = (Get-Date) - $startTime
+          Write-Host "Encoder exit code: $($process.ExitCode)"
+          Write-Host "Elapsed: $($elapsed.TotalSeconds) seconds"
+
+          if ($process.ExitCode -ne 0) {
+            throw "radvideo64.exe exited with code $($process.ExitCode)"
+          }
+
+          if (-not (Test-Path $output)) {
+            throw "Output file $output was not created"
+          }
+
+          $outputSize = (Get-Item $output).Length
+          Write-Host "Output: $output ($outputSize bytes)"
+
+      - name: Verify .bik file
+        shell: pwsh
+        run: |
+          $file = "${{ inputs.output_name }}.bik"
+          $bytes = [System.IO.File]::ReadAllBytes($file)
+          # Bink 1 files start with signature BIKf, BIKg, BIKh, or BIKi
+          $sig = [System.Text.Encoding]::ASCII.GetString($bytes, 0, 4)
+          Write-Host "First 4 bytes: '$sig'"
+          if ($sig -notin @('BIKf', 'BIKg', 'BIKh', 'BIKi')) {
+            throw "File does not appear to be a valid Bink file (signature: '$sig')"
+          }
+          Write-Host "Valid Bink signature: $sig"
+
+      - name: Upload .bik as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.output_name }}.bik
+          path: ${{ inputs.output_name }}.bik
+          if-no-files-found: error
+          retention-days: 30

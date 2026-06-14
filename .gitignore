@@ -1,0 +1,6 @@
+# Build artifacts
+*.bik
+*.bk2
+
+# Don't ignore the test fixture (committed for first-run convenience)
+!test-fixtures/
