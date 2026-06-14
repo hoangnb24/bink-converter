@@ -117,6 +117,29 @@ jobs:
           $ba = "${{ inputs.audio_bitrate }}"
           $format = "${{ inputs.format }}"
 
+          # radvideo64.exe is a GUI subsystem app. On Windows Server runners
+          # (Session 0, no interactive desktop), the GUI subsystem hangs
+          # waiting for a window station. Patch the PE subsystem byte from
+          # 0x02 (Windows GUI) to 0x03 (Windows Console) so it can run
+          # headlessly. The actual code paths still work; they just won't
+          # try to create a window.
+          Write-Host "Patching PE subsystem byte (GUI → Console)..."
+          $bytes = [System.IO.File]::ReadAllBytes("radtools-cache\radvideo64.exe")
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          # Subsystem is at PE+4 (sig) + 20 (COFF) + 68 (offset within opt header) = PE+92
+          $subsystemOffset = $peOffset + 92
+          $originalSubsystem = $bytes[$subsystemOffset]
+          Write-Host "  PE offset: 0x$($peOffset.ToString('X'))"
+          Write-Host "  Subsystem offset: 0x$($subsystemOffset.ToString('X'))"
+          Write-Host "  Original subsystem: $originalSubsystem (2=GUI, 3=Console)"
+          if ($originalSubsystem -ne 2) {
+            Write-Host "  Already patched or unexpected value, skipping patch"
+          } else {
+            $bytes[$subsystemOffset] = 3
+            [System.IO.File]::WriteAllBytes("radtools-cache\radvideo64.exe", $bytes)
+            Write-Host "  Patched to: 3 (Console)"
+          }
+
           # Build argument list
           # /bink  = output to Bink format
           # /bink1 = Bink 1 (.bik) vs /bink2 (.bk2)
@@ -133,12 +156,22 @@ jobs:
 
           Write-Host "Running: radvideo64.exe $($args -join ' ')"
           $startTime = Get-Date
-          $process = Start-Process -FilePath ".\radtools-cache\radvideo64.exe" `
-            -ArgumentList $args `
-            -NoNewWindow -Wait -PassThru
+          # Use cmd /c to give the process a proper console environment
+          $process = Start-Process -FilePath "cmd.exe" `
+            -ArgumentList "/c radtools-cache\radvideo64.exe $($args -join ' ')" `
+            -NoNewWindow -Wait -PassThru -RedirectStandardOutput "encoder-stdout.log" -RedirectStandardError "encoder-stderr.log"
           $elapsed = (Get-Date) - $startTime
           Write-Host "Encoder exit code: $($process.ExitCode)"
           Write-Host "Elapsed: $($elapsed.TotalSeconds) seconds"
+
+          if (Test-Path "encoder-stdout.log") {
+            Write-Host "--- stdout ---"
+            Get-Content "encoder-stdout.log" | Write-Host
+          }
+          if (Test-Path "encoder-stderr.log") {
+            Write-Host "--- stderr ---"
+            Get-Content "encoder-stderr.log" | Write-Host
+          }
 
           if ($process.ExitCode -ne 0) {
             throw "radvideo64.exe exited with code $($process.ExitCode)"
