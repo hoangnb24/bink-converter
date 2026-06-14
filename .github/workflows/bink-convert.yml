@@ -162,6 +162,17 @@ jobs:
           cp input.mp4 $WINEPREFIX/drive_c/input.mp4
           ls -lah $WINEPREFIX/drive_c/input.mp4
 
+      - name: Copy RAD Tools binary into Wine prefix
+        env:
+          WINEPREFIX: ${{ env.WINEPREFIX }}
+        run: |
+          # The cache lives at the GHA worktree root, but Wine resolves
+          # paths relative to its drive mapping. Copy the binary into
+          # the prefix's C: drive so Wine can find it.
+          mkdir -p $WINEPREFIX/drive_c/radtools
+          cp radtools-cache/radvideo64.exe $WINEPREFIX/drive_c/radtools/
+          ls -lah $WINEPREFIX/drive_c/radtools/
+
       - name: Run RAD Video Tools encoder under Wine
         env:
           DISPLAY: :99
@@ -172,9 +183,8 @@ jobs:
           cd $WINEPREFIX/drive_c
           echo "Running radvideo64.exe under Wine + Xvfb..."
           start=$(date +%s)
-          # Arguments after the binary: input.mp4 /bink /bink1 /bvN /baN output.bik
-          # Use 'wine' wrapper - dispatches to wine64 automatically
-          timeout 300 wine radtools-cache/radvideo64.exe \
+          # Use Windows-style path (Z:\ or C:\) so Wine resolves it correctly
+          timeout 300 wine radtools/radvideo64.exe \
             input.mp4 \
             /bink /bink${{ inputs.format }} \
             /bv${{ inputs.video_bitrate }} \
